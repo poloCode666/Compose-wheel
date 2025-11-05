@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "ComposeWheel"
 include(":app")
- 
+include(":demo-jvm")

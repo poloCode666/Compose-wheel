@@ -14,7 +14,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
-import com.polo.composewheel.ui.banner.BannerPreviewDark
 import com.polo.composewheel.ui.loading.OneCallPagingList
 import com.polo.composewheel.ui.loading.PagingPullToRefreshScreen
 import com.polo.composewheel.ui.theme.ComposeWheelTheme
