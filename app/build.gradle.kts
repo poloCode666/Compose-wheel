@@ -61,4 +61,6 @@ dependencies {
     implementation("androidx.paging:paging-compose:3.3.6")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
+        implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("com.github.qqnp1100:SVGAPlayer-Android:1.0.24")
 }

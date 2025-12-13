@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">ComposeWheel</string>
+    <string name="svga_play_button">Play SVGA (from assets/demo.svga)</string>
 </resources>
