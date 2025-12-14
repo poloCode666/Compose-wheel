@@ -12,8 +12,10 @@ import com.opensource.svgaplayer.coroutine.SvgaCoroutineManager
 import com.opensource.svgaplayer.download.FileDownloader
 import com.opensource.svgaplayer.proto.MovieEntity
 import com.opensource.svgaplayer.utils.log.LogUtils
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -673,5 +675,137 @@ class SVGAParser constructor(context: Context) {
         if (!outputFileCanonicalPath.startsWith(dstDirCanonicalPath)) {
             throw IOException("Found Zip Path Traversal Vulnerability with $dstDirCanonicalPath")
         }
+    }
+
+    // ==================== 挂起函数版本 ====================
+
+    /**
+     * 挂起函数版本：从 InputStream 解码 SVGA 文件
+     * 直接返回 SVGAVideoEntity，不需要回调
+     *
+     * @param inputStream 输入流
+     * @param cacheKey 缓存键
+     * @param config SVGA 配置
+     * @param closeInputStream 是否在解析完成后关闭输入流
+     * @param alias 别名，用于日志
+     * @return SVGAVideoEntity 解析成功返回实体
+     * @throws IllegalStateException 解析失败时抛出异常
+     */
+    suspend fun decodeFromInputStreamSuspend(
+        inputStream: InputStream,
+        cacheKey: String,
+        config: SVGAConfig = SVGAConfig(),
+        closeInputStream: Boolean = true,
+        alias: String? = null
+    ): SVGAVideoEntity = withContext(Dispatchers.IO) {
+        if (mContext == null) {
+            throw IllegalStateException("在配置 SVGAParser context 前, 无法解析 SVGA 文件。")
+        }
+        LogUtils.info(TAG, "================ decode $alias from input stream (suspend) ================")
+
+        try {
+            // 检查是否是 zip 文件
+            val magicCode = ByteArray(4)
+            if (inputStream.markSupported()) {
+                inputStream.mark(4)
+                inputStream.read(magicCode)
+                inputStream.reset()
+            }
+
+            if (isZipFile(magicCode)) {
+                LogUtils.info(TAG, "decode from zip file")
+                if (!SVGAFileCache.buildCacheDir(cacheKey).exists() || isUnzipping) {
+                    synchronized(fileLock) {
+                        if (!SVGAFileCache.buildCacheDir(cacheKey).exists()) {
+                            isUnzipping = true
+                            LogUtils.info(TAG, "no cached, prepare to unzip")
+                            unzip(inputStream, cacheKey)
+                            isUnzipping = false
+                            LogUtils.info(TAG, "unzip success")
+                        }
+                    }
+                }
+                decodeFromUnzipDirCacheKeySuspend(cacheKey, config, alias)
+            } else {
+                InflaterInputStream(inputStream).use { inflaterInputStream ->
+                    val entity = MovieEntity.ADAPTER.decode(inflaterInputStream)
+                    val videoItem = SVGAVideoEntity(
+                        entity,
+                        File(cacheKey),
+                        config.frameWidth,
+                        config.frameHeight,
+                        null
+                    )
+                    LogUtils.info(TAG, "SVGAVideoEntity prepare start")
+                    videoItem.prepareSuspend()
+                    LogUtils.info(TAG, "SVGAVideoEntity prepare success")
+                    videoItem
+                }
+            }
+        } finally {
+            if (closeInputStream) {
+                try {
+                    inputStream.close()
+                } catch (_: Exception) {
+                    // ignore
+                }
+            }
+            LogUtils.info(TAG, "================ decode $alias from input stream end ================")
+        }
+    }
+
+    /**
+     * 挂起函数版本：从缓存目录解码
+     */
+    private suspend fun decodeFromUnzipDirCacheKeySuspend(
+        cacheKey: String,
+        config: SVGAConfig,
+        alias: String?
+    ): SVGAVideoEntity = withContext(Dispatchers.IO) {
+        LogUtils.info(TAG, "================ decode $alias from cache (suspend) ================")
+        val cacheDir = SVGAFileCache.buildCacheDir(cacheKey)
+
+        // 尝试读取 binary 格式
+        val binaryFile = File(cacheDir, "movie.binary")
+        if (binaryFile.isFile) {
+            FileInputStream(binaryFile).use { fis ->
+                val entity = MovieEntity.ADAPTER.decode(fis)
+                val videoItem = SVGAVideoEntity(
+                    entity,
+                    cacheDir,
+                    config.frameWidth,
+                    config.frameHeight,
+                    null
+                )
+                videoItem.prepareSuspend()
+                return@withContext videoItem
+            }
+        }
+
+        // 尝试读取 spec (JSON) 格式
+        val specFile = File(cacheDir, "movie.spec")
+        if (specFile.isFile) {
+            FileInputStream(specFile).use { fis ->
+                ByteArrayOutputStream().use { baos ->
+                    val buffer = ByteArray(2048)
+                    var len: Int
+                    while (fis.read(buffer).also { len = it } != -1) {
+                        baos.write(buffer, 0, len)
+                    }
+                    val jsonObj = JSONObject(baos.toString())
+                    val videoItem = SVGAVideoEntity(
+                        jsonObj,
+                        cacheDir,
+                        config.frameWidth,
+                        config.frameHeight,
+                        null
+                    )
+                    videoItem.prepareSuspend()
+                    return@withContext videoItem
+                }
+            }
+        }
+
+        throw IllegalStateException("缓存目录中找不到有效的 SVGA 文件: $cacheKey")
     }
 }

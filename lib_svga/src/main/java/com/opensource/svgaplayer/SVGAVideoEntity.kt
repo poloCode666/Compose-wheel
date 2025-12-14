@@ -18,7 +18,9 @@ import com.opensource.svgaplayer.utils.SVGARect
 import com.opensource.svgaplayer.utils.log.LogUtils
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
+import kotlin.coroutines.resume
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -152,6 +154,27 @@ class SVGAVideoEntity {
             }
         }
     }
+
+    /**
+     * 挂起函数版本的 prepare
+     * 直接挂起等待准备完成，不需要回调
+     */
+    suspend fun prepareSuspend() = suspendCancellableCoroutine { continuation ->
+        prepare(
+            callback = {
+                if (continuation.isActive) {
+                    continuation.resume(Unit)
+                }
+            },
+            playCallback = null
+        )
+
+        continuation.invokeOnCancellation {
+            // 取消时清理
+            mCallback.set(null)
+        }
+    }
+
 
     private fun parserImages(json: JSONObject) {
         val imgJson = json.optJSONObject("images") ?: return
