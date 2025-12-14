@@ -30,11 +30,11 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = "11"
+        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
@@ -61,4 +61,11 @@ dependencies {
     implementation("androidx.paging:paging-compose:3.3.6")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
+        implementation("androidx.appcompat:appcompat:1.6.1")
+//    implementation("com.github.qqnp1100:SVGAPlayer-Android:1.0.24")
+    // OkHttp for network requests
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Okio for file downloading
+    implementation("com.squareup.okio:okio:3.9.0")
+    implementation(project(":lib_svga"))
 }
