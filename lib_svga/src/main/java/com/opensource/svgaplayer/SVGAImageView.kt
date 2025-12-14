@@ -18,10 +18,49 @@ import com.opensource.svgaplayer.utils.SVGARange
 import com.opensource.svgaplayer.utils.Source2UrlMapping
 import com.opensource.svgaplayer.utils.SourceUtil
 import com.opensource.svgaplayer.utils.log.LogUtils
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 import java.net.URL
 import java.net.URLDecoder
+
+/**
+ * SVGA 加载状态
+ */
+sealed class SVGALoadState {
+    object Idle : SVGALoadState()
+    data class Loading(val progress: Int = 0) : SVGALoadState() // progress: 0-100
+    data class Success(
+        val videoItem: SVGAVideoEntity,
+        val loadTimeMs: Long = 0L // 加载耗时（毫秒）
+    ) : SVGALoadState()
+    data class Error(
+        val exception: Throwable,
+        val stage: String = "Unknown", // 错误发生的阶段
+        val url: String? = null, // 发生错误时的 URL
+        val additionalInfo: String? = null // 额外的错误信息
+    ) : SVGALoadState() {
+        /**
+         * 获取详细的错误信息
+         */
+        fun getDetailedMessage(): String {
+            val sb = StringBuilder()
+            sb.append("错误阶段: $stage")
+            if (url != null) {
+                sb.append(", URL: $url")
+            }
+            sb.append(", 异常类型: ${exception.javaClass.simpleName}")
+            sb.append(", 异常消息: ${exception.message ?: "无"}")
+            if (additionalInfo != null) {
+                sb.append(", 额外信息: $additionalInfo")
+            }
+            return sb.toString()
+        }
+    }
+}
 
 /**
  * Created by PonyCui on 2017/3/29.
@@ -586,6 +625,210 @@ open class SVGAImageView @JvmOverloads constructor(
 
     fun getLastSource(): String? {
         return lastSource
+    }
+
+    /**
+     * 从 URL 加载 SVGA 文件（Flow 版本）
+     * 使用 SVGAParser 下载并解析，通过 Flow 返回加载状态
+     * 自动选择线程池：有缓存使用 Default（更快），需要下载使用 IO
+     * 
+     * @param url SVGA 文件的 URL
+     * @param config SVGA 配置
+     * @return Flow<SVGALoadState> 加载状态流
+     */
+    fun loadFromUrlFlow(
+        url: String,
+        config: SVGAConfig? = null
+    ): Flow<SVGALoadState> = flow {
+        // 记录开始时间
+        val startTime = System.currentTimeMillis()
+        
+        if (url.isNullOrEmpty()) {
+            val error = IllegalArgumentException("URL is empty")
+            emit(SVGALoadState.Error(
+                exception = error,
+                stage = "URL验证",
+                url = url,
+                additionalInfo = "URL为空或null"
+            ))
+            return@flow
+        }
+
+        // 检查是否是相同资源，避免重复加载
+        if (isReplayDrawable(url)) {
+            val drawable = getSVGADrawable()
+            if (drawable != null && !drawable.cleared) {
+                val elapsedTime = System.currentTimeMillis() - startTime
+                LogUtils.info(TAG, "SVGA 加载成功（使用缓存），耗时: ${elapsedTime}ms, URL: $url")
+                emit(SVGALoadState.Success(drawable.videoItem, elapsedTime))
+                return@flow
+            }
+        }
+
+        emit(SVGALoadState.Loading(0))
+        this@SVGAImageView.lastSource = url
+        this@SVGAImageView.lastConfig = config
+
+        var currentStage = "初始化"
+        var currentUrl = url
+        var realUrl: String? = null
+
+        try {
+            // 初始化 parser
+            currentStage = "Parser初始化"
+            var parser = SVGAParser.shareParser()
+            if (parser == null) {
+                SVGAParser.init(context.applicationContext)
+                parser = SVGAParser.shareParser()
+            }
+            if (parser == null) {
+                val error = IllegalStateException("SVGAParser 初始化失败")
+                emit(SVGALoadState.Error(
+                    exception = error,
+                    stage = currentStage,
+                    url = url,
+                    additionalInfo = "SVGAParser.shareParser() 返回 null，即使调用 init 后仍为 null"
+                ))
+                return@flow
+            }
+
+            emit(SVGALoadState.Loading(30))
+
+            // 构建配置
+            currentStage = "配置构建"
+            val cfg = config ?: SVGAConfig(
+                frameWidth = width.takeIf { it > 0 } ?: 0,
+                frameHeight = height.takeIf { it > 0 } ?: 0
+            )
+
+            // 检查 URL 重定向和 URL 解码
+            currentStage = "URL处理"
+            val urlDecoder = UrlDecoderManager.getUrlDecoder()
+            val checkedUrl = checkRedirection(url)
+            realUrl = urlDecoder.decodeSvgaUrl(
+                checkedUrl,
+                cfg.frameWidth.takeIf { it > 0 } ?: width,
+                cfg.frameHeight.takeIf { it > 0 } ?: height
+            )
+            currentUrl = realUrl
+
+            // 验证是否为有效 URL
+            if (!SourceUtil.isUrl(realUrl)) {
+                val error = IllegalArgumentException("Invalid URL: $realUrl")
+                emit(SVGALoadState.Error(
+                    exception = error,
+                    stage = currentStage,
+                    url = url,
+                    additionalInfo = "原始URL: $url, 处理后URL: $realUrl, SourceUtil.isUrl() 返回 false"
+                ))
+                return@flow
+            }
+
+            val decodedUrl = try {
+                currentStage = "URL解码"
+                URLDecoder.decode(realUrl, "UTF-8")
+            } catch (e: Exception) {
+                LogUtils.warn(TAG, "URL解码失败，使用原始URL: $realUrl error: ${e.message}")
+                realUrl
+            }
+
+            val urlObj = try {
+                currentStage = "URL对象创建"
+                URL(decodedUrl)
+            } catch (e: Exception) {
+                emit(SVGALoadState.Error(
+                    exception = IllegalArgumentException("Invalid URL format: $decodedUrl", e),
+                    stage = currentStage,
+                    url = url,
+                    additionalInfo = "原始URL: $url, 处理后URL: $realUrl, 解码后URL: $decodedUrl, 无法创建URL对象"
+                ))
+                return@flow
+            }
+
+            // 检查是否正在加载相同资源
+            if (loadingSource == realUrl && loadJob?.isActive == true) {
+                LogUtils.debug(TAG, "相同资源正在加载中，跳过: $realUrl")
+                return@flow
+            }
+
+            loadingSource = realUrl
+            clear()
+
+            emit(SVGALoadState.Loading(50))
+
+            // 使用 suspend 函数解析（自动选择线程池：有缓存用Default，需要下载用IO）
+            currentStage = "下载和解析"
+            val videoItem = try {
+                parser.decodeFromURLSuspend(urlObj, cfg, realUrl)
+            } catch (e: Exception) {
+                // 捕获解析阶段的错误，添加更详细的上下文
+                throw Exception("解析SVGA文件失败: ${e.message}", e).apply {
+                    stackTrace = e.stackTrace
+                }
+            }
+
+            emit(SVGALoadState.Loading(90))
+
+            // 在主线程设置并播放
+            currentStage = "设置和播放"
+            try {
+                withContext(Dispatchers.Main) {
+                    setVideoItem(videoItem)
+                    if (cfg.autoPlay) {
+                        startAnimation()
+                    }
+                }
+            } catch (e: Exception) {
+                throw Exception("设置VideoItem或启动动画失败: ${e.message}", e).apply {
+                    stackTrace = e.stackTrace
+                }
+            }
+
+            val elapsedTime = System.currentTimeMillis() - startTime
+            LogUtils.info(TAG, "SVGA 加载成功，耗时: ${elapsedTime}ms, URL: $url")
+            emit(SVGALoadState.Success(videoItem, elapsedTime))
+
+        } catch (e: Exception) {
+            LogUtils.error(TAG, "loadFromUrlFlow error at stage [$currentStage]: ${e.message}", e)
+            
+            // 构建详细的错误信息
+            val errorDetails = buildString {
+                append("阶段: $currentStage")
+                append(", 原始URL: $url")
+                if (realUrl != null && realUrl != url) {
+                    append(", 处理后URL: $realUrl")
+                }
+                append(", View尺寸: ${width}x${height}")
+                if (config != null) {
+                    append(", 配置: frameWidth=${config.frameWidth}, frameHeight=${config.frameHeight}")
+                }
+                append(", 异常类型: ${e.javaClass.name}")
+                append(", 异常消息: ${e.message ?: "无"}")
+                
+                // 添加堆栈跟踪的前几行
+                val stackTrace = e.stackTrace
+                if (stackTrace.isNotEmpty()) {
+                    append(", 堆栈: ")
+                    stackTrace.take(3).forEachIndexed { index, element ->
+                        if (index > 0) append(" -> ")
+                        append("${element.className}.${element.methodName}(${element.fileName}:${element.lineNumber})")
+                    }
+                }
+                
+                // 如果有 cause，也记录
+                e.cause?.let { cause ->
+                    append(", 原因: ${cause.javaClass.simpleName}: ${cause.message}")
+                }
+            }
+            
+            emit(SVGALoadState.Error(
+                exception = e,
+                stage = currentStage,
+                url = url,
+                additionalInfo = errorDetails
+            ))
+            onError?.invoke(this@SVGAImageView)
+        }
     }
 
     private class AnimatorListener(var weakView: WeakReference<SVGAImageView>) :

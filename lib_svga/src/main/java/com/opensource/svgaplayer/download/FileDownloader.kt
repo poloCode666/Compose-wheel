@@ -75,15 +75,19 @@ open class FileDownloader {
                 val request = Request.Builder().url(url).build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
-                        throw IOException("Unexpected code $response")
+                        throw IOException("HTTP error code: ${response.code}, message: ${response.message}")
                     }
 
                     val body = response.body ?: throw IOException("Empty response body")
+                    val contentLength = body.contentLength()
+                    
+                    LogUtils.info(TAG, "开始下载，Content-Length: $contentLength bytes")
 
                     if (!cacheFile.exists()) {
                         cacheFile.createNewFile()
                     }
 
+                    var totalBytesRead = 0L
                     body.byteStream().use { inputStream ->
                         FileOutputStream(cacheFile).use { output ->
                             val buffer = ByteArray(SIZE)
@@ -93,9 +97,28 @@ open class FileDownloader {
                                     break
                                 }
                                 output.write(buffer, 0, bytesRead)
+                                totalBytesRead += bytesRead
                             }
                             output.flush()
                         }
+                    }
+                    
+                    // 验证下载完整性
+                    val actualFileSize = cacheFile.length()
+                    LogUtils.info(TAG, "下载完成，实际大小: $actualFileSize bytes, 预期大小: $contentLength bytes")
+                    
+                    if (contentLength > 0 && actualFileSize != contentLength) {
+                        val errorMsg = "文件下载不完整: 实际大小=$actualFileSize, 预期大小=$contentLength, 差异=${contentLength - actualFileSize} bytes"
+                        LogUtils.error(TAG, errorMsg)
+                        cacheFile.delete()
+                        throw IOException(errorMsg)
+                    }
+                    
+                    if (actualFileSize == 0L) {
+                        val errorMsg = "下载的文件大小为0，可能是空文件或下载失败"
+                        LogUtils.error(TAG, errorMsg)
+                        cacheFile.delete()
+                        throw IOException(errorMsg)
                     }
                 }
 

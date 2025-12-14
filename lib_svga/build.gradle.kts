@@ -25,6 +25,9 @@ android {
 dependencies {
     api(libs.wire)
     api(libs.coroutines)
+    
+    // Flow support
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2")
 
     implementation(platform(libs.okhttpPlatformBom)) // 提供版本
     implementation(libs.okhttp3) // 只引入核心
