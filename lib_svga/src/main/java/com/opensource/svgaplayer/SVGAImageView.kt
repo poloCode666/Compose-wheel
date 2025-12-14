@@ -33,7 +33,10 @@ import java.net.URLDecoder
 sealed class SVGALoadState {
     object Idle : SVGALoadState()
     data class Loading(val progress: Int = 0) : SVGALoadState() // progress: 0-100
-    data class Success(val videoItem: SVGAVideoEntity) : SVGALoadState()
+    data class Success(
+        val videoItem: SVGAVideoEntity,
+        val loadTimeMs: Long = 0L // 加载耗时（毫秒）
+    ) : SVGALoadState()
     data class Error(
         val exception: Throwable,
         val stage: String = "Unknown", // 错误发生的阶段
@@ -627,6 +630,7 @@ open class SVGAImageView @JvmOverloads constructor(
     /**
      * 从 URL 加载 SVGA 文件（Flow 版本）
      * 使用 SVGAParser 下载并解析，通过 Flow 返回加载状态
+     * 自动选择线程池：有缓存使用 Default（更快），需要下载使用 IO
      * 
      * @param url SVGA 文件的 URL
      * @param config SVGA 配置
@@ -636,6 +640,9 @@ open class SVGAImageView @JvmOverloads constructor(
         url: String,
         config: SVGAConfig? = null
     ): Flow<SVGALoadState> = flow {
+        // 记录开始时间
+        val startTime = System.currentTimeMillis()
+        
         if (url.isNullOrEmpty()) {
             val error = IllegalArgumentException("URL is empty")
             emit(SVGALoadState.Error(
@@ -651,7 +658,9 @@ open class SVGAImageView @JvmOverloads constructor(
         if (isReplayDrawable(url)) {
             val drawable = getSVGADrawable()
             if (drawable != null && !drawable.cleared) {
-                emit(SVGALoadState.Success(drawable.videoItem))
+                val elapsedTime = System.currentTimeMillis() - startTime
+                LogUtils.info(TAG, "SVGA 加载成功（使用缓存），耗时: ${elapsedTime}ms, URL: $url")
+                emit(SVGALoadState.Success(drawable.videoItem, elapsedTime))
                 return@flow
             }
         }
@@ -747,12 +756,10 @@ open class SVGAImageView @JvmOverloads constructor(
 
             emit(SVGALoadState.Loading(50))
 
-            // 使用 suspend 函数解析
+            // 使用 suspend 函数解析（自动选择线程池：有缓存用Default，需要下载用IO）
             currentStage = "下载和解析"
             val videoItem = try {
-                withContext(Dispatchers.IO) {
-                    parser.decodeFromURLSuspend(urlObj, cfg, realUrl)
-                }
+                parser.decodeFromURLSuspend(urlObj, cfg, realUrl)
             } catch (e: Exception) {
                 // 捕获解析阶段的错误，添加更详细的上下文
                 throw Exception("解析SVGA文件失败: ${e.message}", e).apply {
@@ -777,7 +784,9 @@ open class SVGAImageView @JvmOverloads constructor(
                 }
             }
 
-            emit(SVGALoadState.Success(videoItem))
+            val elapsedTime = System.currentTimeMillis() - startTime
+            LogUtils.info(TAG, "SVGA 加载成功，耗时: ${elapsedTime}ms, URL: $url")
+            emit(SVGALoadState.Success(videoItem, elapsedTime))
 
         } catch (e: Exception) {
             LogUtils.error(TAG, "loadFromUrlFlow error at stage [$currentStage]: ${e.message}", e)

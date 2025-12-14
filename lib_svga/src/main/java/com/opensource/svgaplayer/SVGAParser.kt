@@ -702,6 +702,7 @@ class SVGAParser constructor(context: Context) {
         closeInputStream: Boolean = true,
         alias: String? = null
     ): SVGAVideoEntity = withContext(Dispatchers.IO) {
+        val streamDecodeStartTime = System.currentTimeMillis()
         if (mContext == null) {
             throw IllegalStateException("在配置 SVGAParser context 前, 无法解析 SVGA 文件。")
         }
@@ -709,12 +710,15 @@ class SVGAParser constructor(context: Context) {
 
         try {
             // 检查是否是 zip 文件
+            val magicCheckStart = System.currentTimeMillis()
             val magicCode = ByteArray(4)
             if (inputStream.markSupported()) {
                 inputStream.mark(4)
                 inputStream.read(magicCode)
                 inputStream.reset()
             }
+            val magicCheckTime = System.currentTimeMillis() - magicCheckStart
+            LogUtils.info(TAG, "Magic Code 检查耗时: ${magicCheckTime}ms")
 
             if (isZipFile(magicCode)) {
                 LogUtils.info(TAG, "decode from zip file")
@@ -723,13 +727,20 @@ class SVGAParser constructor(context: Context) {
                         if (!SVGAFileCache.buildCacheDir(cacheKey).exists()) {
                             isUnzipping = true
                             LogUtils.info(TAG, "no cached, prepare to unzip")
+                            val unzipStart = System.currentTimeMillis()
                             unzip(inputStream, cacheKey)
+                            val unzipTime = System.currentTimeMillis() - unzipStart
+                            LogUtils.info(TAG, "unzip success, 解压耗时: ${unzipTime}ms")
                             isUnzipping = false
-                            LogUtils.info(TAG, "unzip success")
                         }
                     }
                 }
-                decodeFromUnzipDirCacheKeySuspend(cacheKey, config, alias)
+                val unzipDecodeStart = System.currentTimeMillis()
+                val result = decodeFromUnzipDirCacheKeySuspend(cacheKey, config, alias)
+                val unzipDecodeTime = System.currentTimeMillis() - unzipDecodeStart
+                val totalTime = System.currentTimeMillis() - streamDecodeStartTime
+                LogUtils.info(TAG, "ZIP 文件解码耗时: ${unzipDecodeTime}ms, 总耗时: ${totalTime}ms")
+                return@withContext result
             } else {
                 // 在解析前检查文件大小（如果是文件输入流）
                 val fileSize = if (inputStream is java.io.FileInputStream) {
@@ -743,12 +754,18 @@ class SVGAParser constructor(context: Context) {
                     -1L
                 }
                 if (fileSize > 0) {
-                    LogUtils.info(TAG, "准备解压 SVGA 文件，文件大小: $fileSize bytes")
+                    LogUtils.info(TAG, "准备解压 SVGA 文件，文件大小: $fileSize bytes (${fileSize / 1024}KB)")
                 }
                 
                 try {
+                    val inflateStart = System.currentTimeMillis()
                     InflaterInputStream(inputStream).use { inflaterInputStream ->
+                        val decodeStart = System.currentTimeMillis()
                         val entity = MovieEntity.ADAPTER.decode(inflaterInputStream)
+                        val decodeTime = System.currentTimeMillis() - decodeStart
+                        val inflateTime = System.currentTimeMillis() - inflateStart
+                        LogUtils.info(TAG, "解压耗时: ${inflateTime}ms, 解码耗时: ${decodeTime}ms")
+                        
                         val videoItem = SVGAVideoEntity(
                             entity,
                             File(cacheKey),
@@ -757,8 +774,13 @@ class SVGAParser constructor(context: Context) {
                             null
                         )
                         LogUtils.info(TAG, "SVGAVideoEntity prepare start")
+                        val prepareStart = System.currentTimeMillis()
                         videoItem.prepareSuspend()
-                        LogUtils.info(TAG, "SVGAVideoEntity prepare success")
+                        val prepareTime = System.currentTimeMillis() - prepareStart
+                        LogUtils.info(TAG, "SVGAVideoEntity prepare success, prepare 耗时: ${prepareTime}ms")
+                        
+                        val totalTime = System.currentTimeMillis() - streamDecodeStartTime
+                        LogUtils.info(TAG, "输入流解析总耗时: ${totalTime}ms (解压: ${inflateTime}ms, prepare: ${prepareTime}ms)")
                         videoItem
                     }
                 } catch (e: java.util.zip.ZipException) {
@@ -812,20 +834,27 @@ class SVGAParser constructor(context: Context) {
 
     /**
      * 挂起函数版本：从缓存目录解码
+     * 使用 Default 线程池，因为本地文件读取通常很快
      */
     private suspend fun decodeFromUnzipDirCacheKeySuspend(
         cacheKey: String,
         config: SVGAConfig,
         alias: String?
-    ): SVGAVideoEntity = withContext(Dispatchers.IO) {
+    ): SVGAVideoEntity = withContext(Dispatchers.Default) {
+        val unzipStartTime = System.currentTimeMillis()
         LogUtils.info(TAG, "================ decode $alias from cache (suspend) ================")
         val cacheDir = SVGAFileCache.buildCacheDir(cacheKey)
 
         // 尝试读取 binary 格式
         val binaryFile = File(cacheDir, "movie.binary")
         if (binaryFile.isFile) {
+            val fileReadStart = System.currentTimeMillis()
             FileInputStream(binaryFile).use { fis ->
+                val decodeStart = System.currentTimeMillis()
                 val entity = MovieEntity.ADAPTER.decode(fis)
+                val decodeTime = System.currentTimeMillis() - decodeStart
+                LogUtils.info(TAG, "Binary 文件读取耗时: ${System.currentTimeMillis() - fileReadStart}ms, 解码耗时: ${decodeTime}ms")
+                
                 val videoItem = SVGAVideoEntity(
                     entity,
                     cacheDir,
@@ -833,7 +862,11 @@ class SVGAParser constructor(context: Context) {
                     config.frameHeight,
                     null
                 )
+                val prepareStart = System.currentTimeMillis()
                 videoItem.prepareSuspend()
+                val prepareTime = System.currentTimeMillis() - prepareStart
+                val totalTime = System.currentTimeMillis() - unzipStartTime
+                LogUtils.info(TAG, "prepare 耗时: ${prepareTime}ms, 总耗时: ${totalTime}ms")
                 return@withContext videoItem
             }
         }
@@ -841,14 +874,23 @@ class SVGAParser constructor(context: Context) {
         // 尝试读取 spec (JSON) 格式
         val specFile = File(cacheDir, "movie.spec")
         if (specFile.isFile) {
+            val fileReadStart = System.currentTimeMillis()
             FileInputStream(specFile).use { fis ->
+                val readStart = System.currentTimeMillis()
                 ByteArrayOutputStream().use { baos ->
                     val buffer = ByteArray(2048)
                     var len: Int
                     while (fis.read(buffer).also { len = it } != -1) {
                         baos.write(buffer, 0, len)
                     }
+                    val readTime = System.currentTimeMillis() - readStart
+                    LogUtils.info(TAG, "Spec 文件读取耗时: ${readTime}ms")
+                    
+                    val jsonParseStart = System.currentTimeMillis()
                     val jsonObj = JSONObject(baos.toString())
+                    val jsonParseTime = System.currentTimeMillis() - jsonParseStart
+                    LogUtils.info(TAG, "JSON 解析耗时: ${jsonParseTime}ms")
+                    
                     val videoItem = SVGAVideoEntity(
                         jsonObj,
                         cacheDir,
@@ -856,7 +898,11 @@ class SVGAParser constructor(context: Context) {
                         config.frameHeight,
                         null
                     )
+                    val prepareStart = System.currentTimeMillis()
                     videoItem.prepareSuspend()
+                    val prepareTime = System.currentTimeMillis() - prepareStart
+                    val totalTime = System.currentTimeMillis() - unzipStartTime
+                    LogUtils.info(TAG, "文件读取总耗时: ${System.currentTimeMillis() - fileReadStart}ms, prepare 耗时: ${prepareTime}ms, 总耗时: ${totalTime}ms")
                     return@withContext videoItem
                 }
             }
@@ -867,39 +913,55 @@ class SVGAParser constructor(context: Context) {
 
     /**
      * 挂起函数版本：从缓存文件解码（SVGA 格式）
+     * 使用 IO 线程池进行测试
      */
     private suspend fun decodeFromSVGAFileCacheKeySuspend(
         cacheKey: String,
         config: SVGAConfig,
         alias: String?
     ): SVGAVideoEntity = withContext(Dispatchers.IO) {
+        val svgaLoadStartTime = System.currentTimeMillis()
         val svgaFile = SVGAFileCache.buildCacheFile(cacheKey)
         LogUtils.info(
             TAG,
             "================ decode $alias from svga cache file (suspend) ================ \n" +
                     "svga cache File = $svgaFile"
         )
+        val fileSize = if (svgaFile.exists()) svgaFile.length() else -1L
+        if (fileSize > 0) {
+            LogUtils.info(TAG, "SVGA 缓存文件大小: $fileSize bytes (${fileSize / 1024}KB)")
+        }
+        
+        val fileReadStart = System.currentTimeMillis()
         FileInputStream(svgaFile).use { inputStream ->
+            val fileReadTime = System.currentTimeMillis() - fileReadStart
+            LogUtils.info(TAG, "文件打开耗时: ${fileReadTime}ms")
+            
             //检查是否是zip文件
+            val magicCheckStart = System.currentTimeMillis()
             val magicCode = ByteArray(4)
             if (inputStream.markSupported()) {
                 inputStream.mark(4)
                 inputStream.read(magicCode)
                 inputStream.reset()
             }
+            val magicCheckTime = System.currentTimeMillis() - magicCheckStart
+            LogUtils.info(TAG, "Magic Code 检查耗时: ${magicCheckTime}ms")
+            
             if (isZipFile(magicCode)) {
                 decodeFromUnzipDirCacheKeySuspend(cacheKey, config, alias)
             } else {
                 LogUtils.info(TAG, "inflate start")
-                val svgaFile = SVGAFileCache.buildCacheFile(cacheKey)
-                val fileSize = if (svgaFile.exists()) svgaFile.length() else -1L
-                if (fileSize > 0) {
-                    LogUtils.info(TAG, "准备解压 SVGA 文件，文件大小: $fileSize bytes")
-                }
                 
                 try {
+                    val inflateStart = System.currentTimeMillis()
                     InflaterInputStream(inputStream).use { inflaterInputStream ->
+                        val decodeStart = System.currentTimeMillis()
                         val entity = MovieEntity.ADAPTER.decode(inflaterInputStream)
+                        val decodeTime = System.currentTimeMillis() - decodeStart
+                        val inflateTime = System.currentTimeMillis() - inflateStart
+                        LogUtils.info(TAG, "解压耗时: ${inflateTime}ms, 解码耗时: ${decodeTime}ms")
+                        
                         val videoItem = SVGAVideoEntity(
                             entity,
                             File(cacheKey),
@@ -912,8 +974,13 @@ class SVGAParser constructor(context: Context) {
                             "inflate complete : width = ${config.frameWidth}, height = ${config.frameHeight}, size = ${videoItem.getMemorySize()}"
                         )
                         LogUtils.info(TAG, "SVGAVideoEntity prepare start")
+                        val prepareStart = System.currentTimeMillis()
                         videoItem.prepareSuspend()
-                        LogUtils.info(TAG, "SVGAVideoEntity prepare success")
+                        val prepareTime = System.currentTimeMillis() - prepareStart
+                        LogUtils.info(TAG, "SVGAVideoEntity prepare success, prepare 耗时: ${prepareTime}ms")
+                        
+                        val totalTime = System.currentTimeMillis() - svgaLoadStartTime
+                        LogUtils.info(TAG, "SVGA 缓存文件加载总耗时: ${totalTime}ms (文件读取: ${fileReadTime}ms, 解压: ${inflateTime}ms, prepare: ${prepareTime}ms)")
                         videoItem
                     }
                 } catch (e: java.util.zip.ZipException) {
@@ -956,6 +1023,7 @@ class SVGAParser constructor(context: Context) {
     /**
      * 挂起函数版本：从 URL 解码 SVGA 文件
      * 直接返回 SVGAVideoEntity，不需要回调
+     * 自动选择线程池：有缓存使用 Default（更快），需要下载使用 IO
      *
      * @param url URL
      * @param config SVGA 配置
@@ -967,7 +1035,8 @@ class SVGAParser constructor(context: Context) {
         url: URL,
         config: SVGAConfig = SVGAConfig(),
         alias: String? = null
-    ): SVGAVideoEntity = withContext(Dispatchers.IO) {
+    ): SVGAVideoEntity {
+        val decodeStartTime = System.currentTimeMillis()
         if (mContext == null) {
             throw IllegalStateException("在配置 SVGAParser context 前, 无法解析 SVGA 文件。")
         }
@@ -975,31 +1044,51 @@ class SVGAParser constructor(context: Context) {
         LogUtils.info(TAG, "================ decode from url (suspend): $urlPath ================")
 
         //加载内存缓存数据
+        val memoryCheckStart = System.currentTimeMillis()
         val memoryCacheKey: String? =
             if (config.isCacheToMemory) SVGAMemoryCache.createKey(urlPath, config) else null
         
         if (memoryCacheKey != null && config.isCacheToMemory) {
             val entity = SVGAMemoryCache.INSTANCE.getData(memoryCacheKey)
             if (entity != null) {
-                LogUtils.info(TAG, "Using memory cache for: $urlPath")
+                val memoryCheckTime = System.currentTimeMillis() - memoryCheckStart
+                LogUtils.info(TAG, "Using memory cache for: $urlPath, 内存缓存检查耗时: ${memoryCheckTime}ms")
                 // 内存缓存中的实体需要重新 prepare
+                val prepareStart = System.currentTimeMillis()
                 entity.prepareSuspend()
-                return@withContext entity
+                val prepareTime = System.currentTimeMillis() - prepareStart
+                val totalTime = System.currentTimeMillis() - decodeStartTime
+                LogUtils.info(TAG, "内存缓存 prepare 耗时: ${prepareTime}ms, 总耗时: ${totalTime}ms")
+                return entity
             }
         }
+        val memoryCheckTime = System.currentTimeMillis() - memoryCheckStart
+        LogUtils.info(TAG, "内存缓存检查耗时: ${memoryCheckTime}ms (未命中)")
 
+        val cacheCheckStart = System.currentTimeMillis()
         val cacheKey = SVGAFileCache.buildCacheKey(url)
         val cachedType = SVGAFileCache.getCachedType(cacheKey)
+        val cacheCheckTime = System.currentTimeMillis() - cacheCheckStart
+        LogUtils.info(TAG, "磁盘缓存检查耗时: ${cacheCheckTime}ms, 缓存类型: ${cachedType?.name ?: "无"}")
         
-        if (cachedType != null) { //加载本地缓存数据
-            LogUtils.info(TAG, "this url has disk cached: $urlPath")
-            if (cachedType == SVGAFileCache.Type.ZIP) {
-                decodeFromUnzipDirCacheKeySuspend(cacheKey, config, urlPath)
-            } else {
-                decodeFromSVGAFileCacheKeySuspend(cacheKey, config, urlPath)
+        if (cachedType != null) { //加载本地缓存数据，使用 IO 线程池进行测试
+            LogUtils.info(TAG, "this url has disk cached: $urlPath, using Dispatchers.IO")
+            val diskLoadStart = System.currentTimeMillis()
+            return withContext(Dispatchers.IO) {
+                val result = if (cachedType == SVGAFileCache.Type.ZIP) {
+                    decodeFromUnzipDirCacheKeySuspend(cacheKey, config, urlPath)
+                } else {
+                    decodeFromSVGAFileCacheKeySuspend(cacheKey, config, urlPath)
+                }
+                val diskLoadTime = System.currentTimeMillis() - diskLoadStart
+                val totalTime = System.currentTimeMillis() - decodeStartTime
+                LogUtils.info(TAG, "磁盘缓存加载耗时: ${diskLoadTime}ms, 总耗时: ${totalTime}ms")
+                result
             }
-        } else { //加载网络数据（下载资源），带重试机制
-            LogUtils.info(TAG, "no cached, prepare to download: $urlPath")
+        } else { //加载网络数据（下载资源），使用 IO 线程池，带重试机制
+            LogUtils.info(TAG, "no cached, prepare to download: $urlPath, using Dispatchers.IO")
+            val downloadStart = System.currentTimeMillis()
+            return withContext(Dispatchers.IO) {
             
             // 重试机制：最多重试2次（总共尝试3次）
             val maxRetries = 2
@@ -1014,6 +1103,7 @@ class SVGAParser constructor(context: Context) {
                     }
                     
                     // 直接使用 suspendCancellableCoroutine 获取 inputStream
+                    val downloadStartTime = System.currentTimeMillis()
                     val inputStream = suspendCancellableCoroutine<InputStream> { continuation ->
                         fileDownloader.resume(url, { inputStream ->
                             continuation.resume(inputStream)
@@ -1025,6 +1115,8 @@ class SVGAParser constructor(context: Context) {
                             LogUtils.info(TAG, "================ decode from url canceled (suspend): $urlPath ================")
                         }
                     }
+                    val downloadTime = System.currentTimeMillis() - downloadStartTime
+                    LogUtils.info(TAG, "文件下载耗时: ${downloadTime}ms")
                     
                     // 验证输入流
                     val availableBytes = try {
@@ -1035,6 +1127,7 @@ class SVGAParser constructor(context: Context) {
                     LogUtils.info(TAG, "准备解析，输入流可用字节数: $availableBytes")
                     
                     // 现在在 suspend 函数作用域中，可以直接调用 suspend 函数
+                    val parseStartTime = System.currentTimeMillis()
                     val videoItem = try {
                         decodeFromInputStreamSuspend(
                             inputStream,
@@ -1068,15 +1161,26 @@ class SVGAParser constructor(context: Context) {
                         }
                         throw IOException(errorMsg, e)
                     }
+                    val parseTime = System.currentTimeMillis() - parseStartTime
+                    LogUtils.info(TAG, "文件解析耗时: ${parseTime}ms")
                     
                     // 保存到内存缓存
+                    val memoryCacheStart = System.currentTimeMillis()
                     memoryCacheKey?.let { 
                         SVGAMemoryCache.INSTANCE.putData(it, videoItem)
+                    }
+                    val memoryCacheTime = System.currentTimeMillis() - memoryCacheStart
+                    if (memoryCacheTime > 0) {
+                        LogUtils.info(TAG, "保存到内存缓存耗时: ${memoryCacheTime}ms")
                     }
                     
                     if (attempt > 0) {
                         LogUtils.info(TAG, "================ 第 ${attempt + 1} 次重试成功: $urlPath ================")
                     }
+                    
+                    val totalDownloadTime = System.currentTimeMillis() - downloadStart
+                    val totalTime = System.currentTimeMillis() - decodeStartTime
+                    LogUtils.info(TAG, "网络下载总耗时: ${totalDownloadTime}ms (下载: ${downloadTime}ms, 解析: ${parseTime}ms), 整体总耗时: ${totalTime}ms")
                     
                     return@withContext videoItem
                     
@@ -1116,10 +1220,11 @@ class SVGAParser constructor(context: Context) {
                         throw e
                     }
                 }
+                }
+                
+                // 理论上不会到达这里，但为了编译安全
+                throw lastException ?: IllegalStateException("未知错误")
             }
-            
-            // 理论上不会到达这里，但为了编译安全
-            throw lastException ?: IllegalStateException("未知错误")
         }
     }
 }

@@ -234,7 +234,10 @@ fun SvgaTestItemCard(item: SvgaTestItem) {
                 text = when (loadState) {
                     is SVGALoadState.Idle -> "状态: 空闲"
                     is SVGALoadState.Loading -> "加载中: ${(loadState as SVGALoadState.Loading).progress}%"
-                    is SVGALoadState.Success -> "✓ 加载成功"
+                    is SVGALoadState.Success -> {
+                        val success = loadState as SVGALoadState.Success
+                        "✓ 加载成功 (${success.loadTimeMs}ms)"
+                    }
                     is SVGALoadState.Error -> {
                         val error = loadState as SVGALoadState.Error
                         "✗ 加载失败 [${error.stage}]: ${error.exception.message?.take(80) ?: "未知错误"}"

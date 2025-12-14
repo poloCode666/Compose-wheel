@@ -3,11 +3,14 @@ package com.polo.composewheel.ui.svga
 import android.graphics.Rect
 import android.util.Log
 import android.view.View
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.layout.boundsInParent
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.onEach
 
 /**
  * SVGA 动画播放器（Compose 版本）
+ * 自动选择线程池：有缓存使用 Default（更快），需要下载使用 IO
  * 
  * @param url SVGA 文件的 URL
  * @param modifier Modifier
@@ -54,6 +58,13 @@ fun SvgaPlayer(
     var svgaView by remember { mutableStateOf<SVGAImageView?>(null) }
     var loadState by remember { mutableStateOf<SVGALoadState>(SVGALoadState.Idle) }
     var isVisible by remember { mutableStateOf(false) }
+    
+    // 渐变动画：当加载成功时，从0f渐变到1f，持续400ms
+    val alpha by animateFloatAsState(
+        targetValue = if (loadState is SVGALoadState.Success) 1f else 0f,
+        animationSpec = tween(durationMillis = 400),
+        label = "SvgaPlayerAlpha"
+    )
 
     // 加载 SVGA 文件的辅助函数
     fun loadSvga(view: SVGAImageView, urlToLoad: String) {
@@ -66,7 +77,7 @@ fun SvgaPlayer(
                 
                 when (state) {
                     is SVGALoadState.Success -> {
-                        Log.d(TAG, "SVGA 加载成功，设置回调，URL: $urlToLoad")
+                        Log.d(TAG, "SVGA 加载成功，耗时: ${state.loadTimeMs}ms，设置回调，URL: $urlToLoad")
                         // 设置回调
                         view.callback = object : com.opensource.svgaplayer.SVGACallback {
                             override fun onStart() {
@@ -229,7 +240,9 @@ fun SvgaPlayer(
                     Log.d(TAG, "SVGAImageView 配置完成")
                 }
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .alpha(alpha),
             update = { view ->
                 // 使用 View 的可见性检测
                 val wasVisible = isVisible
