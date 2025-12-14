@@ -28,4 +28,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "ComposeWheel"
 include(":app")
+include("lib_svga")
 include(":demo-jvm")
