@@ -31,7 +31,7 @@ class SvgaTestActivity : AppCompatActivity() {
 
         btnPlay.setOnClickListener {
             // 使用 GitHub 上的官方 SVGA 测试文件
-            val demoUrl = "https://res.lukeelive.com/FhTlxVQWhIByJoxVADeNGtMpDGFQ"
+            val demoUrl = "https://res.lukeelive.com/FhTlxVQWhIByJoxVADeNGtMpDGFQ?imageslim"
 
             // 使用挂起函数版本
             playFromUrlWithSuspend(demoUrl)
